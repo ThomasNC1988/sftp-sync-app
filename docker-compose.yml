@@ -1,0 +1,20 @@
+version: '3.8'
+
+services:
+  sftp-sync-app:
+    build: .
+    container_name: sftp_sync_worker
+    ports:
+      - "9899:5000"
+    environment:
+      - SFTP_HOST=192.168.1.72
+      - SFTP_PORT=22
+      - SFTP_USER=comma
+      - SFTP_KEY_FILE=/app/keys/comma_key.pem   # Pointing to the mounted key inside the container
+      - REMOTE_DIR=/data/media/0/realdata/
+    volumes:
+      - ./my_downloads:/app/downloads
+      - ./app_data:/app/data
+      # Mount your local keys folder to the container as Read-Only (:ro)
+      - ./my_keys:/app/keys:ro
+    restart: unless-stopped

@@ -1,0 +1,14 @@
+# Ignore local downloads and state data
+my_downloads/
+app_data/
+
+# Ignore your private SSH keys!
+my_keys/
+*.pem
+*.ppk
+*.key
+
+# Python environment variables/caches
+__pycache__/
+*.pyc
+.env
