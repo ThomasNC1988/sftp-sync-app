@@ -22,7 +22,6 @@ HISTORY_FILE = os.getenv('HISTORY_FILE', '/app/data/history.json')
 os.makedirs(LOCAL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
 
-# CHANGED: Create a lock to prevent concurrent runs
 sync_lock = threading.Lock()
 
 def load_history():
@@ -52,7 +51,6 @@ def find_hevc_files(sftp, current_dir):
     return target_files
 
 def sync_sftp_files():
-    # CHANGED: Prevent multiple syncs from running at the exact same time
     if not sync_lock.acquire(blocking=False):
         print("A sync is already in progress. Skipping this trigger to prevent collisions.")
         return
@@ -81,14 +79,11 @@ def sync_sftp_files():
 
                 if remote_filepath not in history:
                     timestamp_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d_%H-%M-%S')
-                    relative_path = remote_filepath[len(REMOTE_DIR):].lstrip('/')
-                    local_subfolder = os.path.dirname(relative_path)
-                    local_dir_path = os.path.join(LOCAL_DIR, local_subfolder)
                     
-                    local_hevc_filepath = os.path.join(local_dir_path, f"{timestamp_str}.hevc")
-                    local_mkv_filepath = os.path.join(local_dir_path, f"{timestamp_str}.mkv")
-                    
-                    os.makedirs(local_dir_path, exist_ok=True)
+                    # CHANGED: We now ignore the remote subfolders entirely.
+                    # Everything drops directly into the root of LOCAL_DIR.
+                    local_hevc_filepath = os.path.join(LOCAL_DIR, f"{timestamp_str}.hevc")
+                    local_mkv_filepath = os.path.join(LOCAL_DIR, f"{timestamp_str}.mkv")
                     
                     try:
                         print(f"Downloading as: {timestamp_str}.hevc")
@@ -105,10 +100,10 @@ def sync_sftp_files():
                         os.remove(local_hevc_filepath)
                         
                         history.add(remote_filepath)
-                        # CHANGED: Save history INSTANTLY after each file succeeds!
                         save_history(history)
                         
-                        downloaded_this_run.append(f"{local_subfolder}/{timestamp_str}.mkv")
+                        # CHANGED: Print the cleaner filename to the logs
+                        downloaded_this_run.append(f"{timestamp_str}.mkv")
                         print(f"Successfully processed {timestamp_str}.mkv!")
                         
                     except Exception as file_e:
@@ -128,7 +123,6 @@ def sync_sftp_files():
             print(f"Error during SFTP sync: {e}")
 
     finally:
-        # CHANGED: Release the lock so the next cycle can run
         sync_lock.release()
 
 # --- Scheduler Setup ---
@@ -148,7 +142,6 @@ def get_history():
 
 @app.route('/trigger-sync')
 def trigger_sync():
-    # Run the sync in a background thread so the web request doesn't freeze
     threading.Thread(target=sync_sftp_files).start()
     return jsonify({"status": "Sync triggered manually (check logs)."})
 
