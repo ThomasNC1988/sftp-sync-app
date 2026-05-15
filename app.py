@@ -8,11 +8,10 @@ from apscheduler.schedulers.background import BackgroundScheduler
 app = Flask(__name__)
 
 # --- Configuration ---
-SFTP_HOST = os.getenv('SFTP_HOST', '192.168.1.100')
+SFTP_HOST = os.getenv('SFTP_HOST', '192.168.1.72')
 SFTP_PORT = int(os.getenv('SFTP_PORT', 22))
-SFTP_USER = os.getenv('SFTP_USER', 'username')
-SFTP_KEY_PATH = os.getenv('SFTP_KEY_PATH', '/app/keys/private_key.pem') 
-# Updated base remote directory
+SFTP_USER = os.getenv('SFTP_USER', 'comma')
+SFTP_KEY_PATH = os.getenv('SFTP_KEY_PATH', '/app/keys/comma_key.pem') 
 REMOTE_DIR = os.getenv('REMOTE_DIR', '/data/media/0/realdata/')
 LOCAL_DIR = os.getenv('LOCAL_DIR', '/app/downloads/')
 HISTORY_FILE = os.getenv('HISTORY_FILE', '/app/data/history.json')
@@ -31,37 +30,33 @@ def save_history(history):
     with open(HISTORY_FILE, 'w') as f:
         json.dump(list(history), f)
 
-def find_ts_files(sftp, current_dir):
+# CHANGED: Renamed function and updated the target filename
+def find_hevc_files(sftp, current_dir):
     """
-    Recursively searches an SFTP directory for .ts files.
+    Recursively searches an SFTP directory specifically for 'fcamera.hevc'.
     Returns a list of full remote file paths.
     """
-    ts_files = []
+    target_files = []
     try:
-        # listdir_attr gives us file attributes so we can check if it's a folder
         for item in sftp.listdir_attr(current_dir):
-            # Construct the remote path using forward slashes (standard for SFTP/Linux)
             item_path = f"{current_dir.rstrip('/')}/{item.filename}"
             
             if stat.S_ISDIR(item.st_mode):
-                # If it's a directory, dive into it
-                ts_files.extend(find_ts_files(sftp, item_path))
-            elif stat.S_ISREG(item.st_mode) and item.filename.lower().endswith('.ts'):
-                # If it's a regular file and ends with .ts, add it to our list
-                ts_files.append(item_path)
+                target_files.extend(find_hevc_files(sftp, item_path))
+            # CHANGED: Now looks for the exact filename fcamera.hevc
+            elif stat.S_ISREG(item.st_mode) and item.filename.lower() == 'fcamera.hevc':
+                target_files.append(item_path)
     except Exception as e:
         print(f"Could not access {current_dir}: {e}")
     
-    return ts_files
+    return target_files
 
 def sync_sftp_files():
     print("Starting SFTP sync job...")
-    # We now store full remote paths in history to avoid subfolder name collisions
     history = load_history() 
     downloaded_this_run = []
 
     try:
-        # Initialize SSH/SFTP Client
         ssh = paramiko.SSHClient()
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
@@ -73,21 +68,15 @@ def sync_sftp_files():
         )
         sftp = ssh.open_sftp()
         
-        # Get all .ts files recursively starting from the base REMOTE_DIR
-        print(f"Scanning {REMOTE_DIR} for .ts files...")
-        all_remote_ts_files = find_ts_files(sftp, REMOTE_DIR)
+        print(f"Scanning {REMOTE_DIR} for fcamera.hevc files...")
+        # CHANGED: Call the updated function
+        all_remote_hevc_files = find_hevc_files(sftp, REMOTE_DIR)
         
-        for remote_filepath in all_remote_ts_files:
+        for remote_filepath in all_remote_hevc_files:
             if remote_filepath not in history:
-                # Figure out the relative path so we can mirror the folder structure locally
-                # Example: remote is '/data/media/0/realdata/Folder1/video.ts'
-                # relative becomes 'Folder1/video.ts'
                 relative_path = remote_filepath[len(REMOTE_DIR):].lstrip('/')
-                
-                # Combine with local base dir: '/app/downloads/Folder1/video.ts'
                 local_filepath = os.path.join(LOCAL_DIR, relative_path)
                 
-                # Ensure the local subfolder exists before trying to download
                 os.makedirs(os.path.dirname(local_filepath), exist_ok=True)
                 
                 try:
@@ -106,7 +95,7 @@ def sync_sftp_files():
             save_history(history)
             print(f"Sync complete. Downloaded: {downloaded_this_run}")
         else:
-            print("Sync complete. No new .ts files found.")
+            print("Sync complete. No new fcamera.hevc files found.")
 
     except Exception as e:
         print(f"Error during SFTP sync: {e}")
