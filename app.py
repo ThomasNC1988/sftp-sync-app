@@ -2,6 +2,7 @@ import os
 import json
 import stat
 import paramiko
+import subprocess
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -16,7 +17,6 @@ REMOTE_DIR = os.getenv('REMOTE_DIR', '/data/media/0/realdata/')
 LOCAL_DIR = os.getenv('LOCAL_DIR', '/app/downloads/')
 HISTORY_FILE = os.getenv('HISTORY_FILE', '/app/data/history.json')
 
-# Ensure local base directories exist
 os.makedirs(LOCAL_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
 
@@ -30,25 +30,17 @@ def save_history(history):
     with open(HISTORY_FILE, 'w') as f:
         json.dump(list(history), f)
 
-# CHANGED: Renamed function and updated the target filename
 def find_hevc_files(sftp, current_dir):
-    """
-    Recursively searches an SFTP directory specifically for 'fcamera.hevc'.
-    Returns a list of full remote file paths.
-    """
     target_files = []
     try:
         for item in sftp.listdir_attr(current_dir):
             item_path = f"{current_dir.rstrip('/')}/{item.filename}"
-            
             if stat.S_ISDIR(item.st_mode):
                 target_files.extend(find_hevc_files(sftp, item_path))
-            # CHANGED: Now looks for the exact filename fcamera.hevc
             elif stat.S_ISREG(item.st_mode) and item.filename.lower() == 'fcamera.hevc':
                 target_files.append(item_path)
     except Exception as e:
         print(f"Could not access {current_dir}: {e}")
-    
     return target_files
 
 def sync_sftp_files():
@@ -61,41 +53,60 @@ def sync_sftp_files():
         ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
         
         ssh.connect(
-            hostname=SFTP_HOST, 
-            port=SFTP_PORT, 
-            username=SFTP_USER, 
-            key_filename=SFTP_KEY_PATH
+            hostname=SFTP_HOST, port=SFTP_PORT, 
+            username=SFTP_USER, key_filename=SFTP_KEY_PATH
         )
         sftp = ssh.open_sftp()
         
         print(f"Scanning {REMOTE_DIR} for fcamera.hevc files...")
-        # CHANGED: Call the updated function
         all_remote_hevc_files = find_hevc_files(sftp, REMOTE_DIR)
         
         for remote_filepath in all_remote_hevc_files:
             if remote_filepath not in history:
                 relative_path = remote_filepath[len(REMOTE_DIR):].lstrip('/')
-                local_filepath = os.path.join(LOCAL_DIR, relative_path)
                 
-                os.makedirs(os.path.dirname(local_filepath), exist_ok=True)
+                # Setup paths for both the raw HEVC and the final MKV
+                local_hevc_filepath = os.path.join(LOCAL_DIR, relative_path)
+                # Swap the .hevc extension for .mkv
+                local_mkv_filepath = os.path.splitext(local_hevc_filepath)[0] + '.mkv'
+                
+                os.makedirs(os.path.dirname(local_hevc_filepath), exist_ok=True)
                 
                 try:
-                    print(f"Downloading new file: {relative_path}")
-                    sftp.get(remote_filepath, local_filepath)
+                    print(f"Downloading raw file: {relative_path}")
+                    sftp.get(remote_filepath, local_hevc_filepath)
                     
+                    print(f"Wrapping into MKV container: {local_mkv_filepath}")
+                    # Run FFmpeg to stream copy (-c copy) into an MKV container instantly
+                    subprocess.run(
+                        ['ffmpeg', '-y', '-i', local_hevc_filepath, '-c', 'copy', local_mkv_filepath], 
+                        check=True, 
+                        stdout=subprocess.DEVNULL, 
+                        stderr=subprocess.DEVNULL
+                    )
+                    
+                    # Delete the raw .hevc file now that we have the MKV
+                    os.remove(local_hevc_filepath)
+                    
+                    # Mark the remote file as processed
                     history.add(remote_filepath)
-                    downloaded_this_run.append(relative_path)
+                    downloaded_this_run.append(relative_path + " (as MKV)")
+                    print(f"Successfully processed into MKV!")
+                    
                 except Exception as file_e:
-                    print(f"Failed to download {remote_filepath}: {file_e}")
+                    print(f"Failed to process {remote_filepath}: {file_e}")
+                    # Cleanup the temporary HEVC file if something broke mid-download
+                    if os.path.exists(local_hevc_filepath):
+                        os.remove(local_hevc_filepath)
 
         sftp.close()
         ssh.close()
         
         if downloaded_this_run:
             save_history(history)
-            print(f"Sync complete. Downloaded: {downloaded_this_run}")
+            print(f"Sync complete. Processed: {downloaded_this_run}")
         else:
-            print("Sync complete. No new fcamera.hevc files found.")
+            print("Sync complete. No new files found.")
 
     except Exception as e:
         print(f"Error during SFTP sync: {e}")
