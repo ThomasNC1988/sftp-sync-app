@@ -69,7 +69,7 @@ def cleanup_old_files():
 
 def sync_sftp_files():
     if not sync_lock.acquire(blocking=False):
-        print("A sync is already in progress. Skipping.")
+        print("A sync check is already executing or waiting. Skipping this interval.")
         return
 
     try:
@@ -79,7 +79,16 @@ def sync_sftp_files():
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-            ssh.connect(SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, key_filename=SFTP_KEY_PATH)
+            
+            # CHANGED: Added timeout=10 to stop it from hanging if the device is offline
+            ssh.connect(
+                hostname=SFTP_HOST, 
+                port=SFTP_PORT, 
+                username=SFTP_USER, 
+                key_filename=SFTP_KEY_PATH,
+                timeout=10,
+                banner_timeout=10
+            )
             sftp = ssh.open_sftp()
             
             all_files = find_hevc_files(sftp, REMOTE_DIR)
@@ -141,13 +150,20 @@ def sync_sftp_files():
             cleanup_old_files()
 
         except Exception as e:
-            print(f"Error during SFTP sync: {e}")
+            print(f"SFTP Connection failed (Device likely offline): {e}")
     finally:
         sync_lock.release()
 
 # --- Scheduler Setup ---
 scheduler = BackgroundScheduler()
-scheduler.add_job(func=sync_sftp_files, trigger="interval", minutes=10)
+# CHANGED: Added misfire_grace_time and max_instances options to the scheduler definition
+scheduler.add_job(
+    func=sync_sftp_files, 
+    trigger="interval", 
+    minutes=10,
+    misfire_grace_time=60,
+    max_instances=1
+)
 scheduler.start()
 
 # --- Web Endpoints ---
@@ -158,7 +174,6 @@ def index():
 @app.route('/history')
 def get_history():
     history = load_history()
-    # Fixed indentation here
     return jsonify({"downloaded_segments": list(history)})
 
 @app.route('/trigger-sync')
