@@ -80,7 +80,7 @@ def sync_sftp_files():
                 mtime = file_data['mtime']
 
                 if remote_filepath not in history:
-                    timestamp_str = datetime.fromtimestamp(mtime).strftime('%Y%m%d%H%M%S')
+                    timestamp_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d_%H-%M-%S')
                     relative_path = remote_filepath[len(REMOTE_DIR):].lstrip('/')
                     local_subfolder = os.path.dirname(relative_path)
                     local_dir_path = os.path.join(LOCAL_DIR, local_subfolder)
