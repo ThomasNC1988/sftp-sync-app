@@ -3,6 +3,7 @@ import json
 import stat
 import paramiko
 import subprocess
+from datetime import datetime
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -38,7 +39,11 @@ def find_hevc_files(sftp, current_dir):
             if stat.S_ISDIR(item.st_mode):
                 target_files.extend(find_hevc_files(sftp, item_path))
             elif stat.S_ISREG(item.st_mode) and item.filename.lower() == 'fcamera.hevc':
-                target_files.append(item_path)
+                # CHANGED: We now save BOTH the path and the modified time as a dictionary
+                target_files.append({
+                    'remote_path': item_path,
+                    'mtime': item.st_mtime
+                })
     except Exception as e:
         print(f"Could not access {current_dir}: {e}")
     return target_files
@@ -61,23 +66,31 @@ def sync_sftp_files():
         print(f"Scanning {REMOTE_DIR} for fcamera.hevc files...")
         all_remote_hevc_files = find_hevc_files(sftp, REMOTE_DIR)
         
-        for remote_filepath in all_remote_hevc_files:
+        # CHANGED: We now loop through the dictionaries
+        for file_data in all_remote_hevc_files:
+            remote_filepath = file_data['remote_path']
+            mtime = file_data['mtime']
+
             if remote_filepath not in history:
+                # 1. Format the Unix timestamp into YYYYMMDDHHMMSS
+                timestamp_str = datetime.fromtimestamp(mtime).strftime('%Y%m%d%H%M%S')
+                
+                # 2. Figure out the local folder path (ignoring the original 'fcamera.hevc' filename)
                 relative_path = remote_filepath[len(REMOTE_DIR):].lstrip('/')
+                local_subfolder = os.path.dirname(relative_path)
+                local_dir_path = os.path.join(LOCAL_DIR, local_subfolder)
                 
-                # Setup paths for both the raw HEVC and the final MKV
-                local_hevc_filepath = os.path.join(LOCAL_DIR, relative_path)
-                # Swap the .hevc extension for .mkv
-                local_mkv_filepath = os.path.splitext(local_hevc_filepath)[0] + '.mkv'
+                # 3. Create the new filenames using the timestamp
+                local_hevc_filepath = os.path.join(local_dir_path, f"{timestamp_str}.hevc")
+                local_mkv_filepath = os.path.join(local_dir_path, f"{timestamp_str}.mkv")
                 
-                os.makedirs(os.path.dirname(local_hevc_filepath), exist_ok=True)
+                os.makedirs(local_dir_path, exist_ok=True)
                 
                 try:
-                    print(f"Downloading raw file: {relative_path}")
+                    print(f"Downloading as: {timestamp_str}.hevc")
                     sftp.get(remote_filepath, local_hevc_filepath)
                     
-                    print(f"Wrapping into MKV container: {local_mkv_filepath}")
-                    # Run FFmpeg to stream copy (-c copy) into an MKV container instantly
+                    print(f"Wrapping into MKV: {timestamp_str}.mkv")
                     subprocess.run(
                         ['ffmpeg', '-y', '-i', local_hevc_filepath, '-c', 'copy', local_mkv_filepath], 
                         check=True, 
@@ -85,17 +98,15 @@ def sync_sftp_files():
                         stderr=subprocess.DEVNULL
                     )
                     
-                    # Delete the raw .hevc file now that we have the MKV
                     os.remove(local_hevc_filepath)
                     
-                    # Mark the remote file as processed
+                    # We still track the ORIGINAL remote path in history so it doesn't re-download
                     history.add(remote_filepath)
-                    downloaded_this_run.append(relative_path + " (as MKV)")
-                    print(f"Successfully processed into MKV!")
+                    downloaded_this_run.append(f"{local_subfolder}/{timestamp_str}.mkv")
+                    print(f"Successfully processed {timestamp_str}.mkv!")
                     
                 except Exception as file_e:
                     print(f"Failed to process {remote_filepath}: {file_e}")
-                    # Cleanup the temporary HEVC file if something broke mid-download
                     if os.path.exists(local_hevc_filepath):
                         os.remove(local_hevc_filepath)
 
