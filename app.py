@@ -4,7 +4,7 @@ import stat
 import paramiko
 import subprocess
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from flask import Flask, jsonify
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -50,6 +50,35 @@ def find_hevc_files(sftp, current_dir):
         print(f"Could not access {current_dir}: {e}")
     return target_files
 
+# --- NEW: Cleanup Function ---
+def cleanup_old_files():
+    print("Running cleanup task: checking for files older than 30 days...")
+    now = datetime.now()
+    deleted_count = 0
+    
+    for filename in os.listdir(LOCAL_DIR):
+        if filename.endswith('.mkv') or filename.endswith('.hevc'):
+            try:
+                # Strip the extension to get just the date string
+                date_str = os.path.splitext(filename)[0]
+                # Convert the string back into a Python datetime object
+                file_date = datetime.strptime(date_str, '%Y-%m-%d_%H-%M-%S')
+                
+                # If the difference between now and the file date is more than 30 days
+                if (now - file_date) > timedelta(days=30):
+                    file_path = os.path.join(LOCAL_DIR, filename)
+                    os.remove(file_path)
+                    print(f"Deleted old file: {filename}")
+                    deleted_count += 1
+            except ValueError:
+                # If a file doesn't match our exact date format, safely ignore it
+                continue
+                
+    if deleted_count > 0:
+        print(f"Cleanup finished. Removed {deleted_count} old files.")
+    else:
+        print("Cleanup finished. No files older than 30 days found.")
+
 def sync_sftp_files():
     if not sync_lock.acquire(blocking=False):
         print("A sync is already in progress. Skipping this trigger to prevent collisions.")
@@ -80,8 +109,6 @@ def sync_sftp_files():
                 if remote_filepath not in history:
                     timestamp_str = datetime.fromtimestamp(mtime).strftime('%Y-%m-%d_%H-%M-%S')
                     
-                    # CHANGED: We now ignore the remote subfolders entirely.
-                    # Everything drops directly into the root of LOCAL_DIR.
                     local_hevc_filepath = os.path.join(LOCAL_DIR, f"{timestamp_str}.hevc")
                     local_mkv_filepath = os.path.join(LOCAL_DIR, f"{timestamp_str}.mkv")
                     
@@ -102,7 +129,6 @@ def sync_sftp_files():
                         history.add(remote_filepath)
                         save_history(history)
                         
-                        # CHANGED: Print the cleaner filename to the logs
                         downloaded_this_run.append(f"{timestamp_str}.mkv")
                         print(f"Successfully processed {timestamp_str}.mkv!")
                         
@@ -118,6 +144,9 @@ def sync_sftp_files():
                 print(f"Sync complete. Processed: {len(downloaded_this_run)} new files.")
             else:
                 print("Sync complete. No new files found.")
+
+            # CHANGED: Run the cleanup task immediately after the sync finishes
+            cleanup_old_files()
 
         except Exception as e:
             print(f"Error during SFTP sync: {e}")
