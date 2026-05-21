@@ -18,11 +18,11 @@ SFTP_USER = os.getenv('SFTP_USER', 'comma')
 SFTP_KEY_PATH = os.getenv('SFTP_KEY_PATH', '/app/keys/comma_key.pem') 
 REMOTE_DIR = os.getenv('REMOTE_DIR', '/data/media/0/realdata/')
 LOCAL_DIR = os.getenv('LOCAL_DIR', '/app/downloads/')
-TEMP_DIR = os.getenv('TEMP_DIR', '/app/temp/') # NEW: Added temp directory config
+TEMP_DIR = os.getenv('TEMP_DIR', '/app/temp/')
 HISTORY_FILE = os.getenv('HISTORY_FILE', '/app/data/history.json')
 
 os.makedirs(LOCAL_DIR, exist_ok=True)
-os.makedirs(TEMP_DIR, exist_ok=True) # Ensure temp directory exists
+os.makedirs(TEMP_DIR, exist_ok=True)
 os.makedirs(os.path.dirname(HISTORY_FILE), exist_ok=True)
 
 sync_lock = threading.Lock()
@@ -79,11 +79,21 @@ def sync_sftp_files():
         try:
             ssh = paramiko.SSHClient()
             ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            
+            # Connection phase timeout
             ssh.connect(
                 hostname=SFTP_HOST, port=SFTP_PORT, username=SFTP_USER, 
                 key_filename=SFTP_KEY_PATH, timeout=10, banner_timeout=10
             )
+            
+            # NEW: Set active data channel transfer timeout (60 seconds)
+            # If a file transfer stalls for 60s, it raises a socket.timeout exception
+            transport = ssh.get_transport()
+            if transport:
+                transport.set_keepalive(15) # Ping every 15s to keep alive / detect dead links fast
+            
             sftp = ssh.open_sftp()
+            sftp.get_channel().settimeout(60.0) # Active read/write timeout
             
             all_files = find_hevc_files(sftp, REMOTE_DIR)
             all_files.sort(key=lambda x: x['mtime'])
@@ -106,12 +116,8 @@ def sync_sftp_files():
                     continue
                 
                 drive_start_time = datetime.fromtimestamp(drive[0]['mtime']).strftime('%Y-%m-%d_%H-%M-%S')
-                
-                # CHANGED: Intermediate stitch files go to TEMP_DIR
                 temp_mkv = os.path.join(TEMP_DIR, f"{drive_start_time}.mkv")
                 concat_list_path = os.path.join(TEMP_DIR, "concat_list.txt")
-                
-                # Final home for Plex to scan
                 final_mkv = os.path.join(LOCAL_DIR, f"{drive_start_time}.mkv")
                 
                 print(f"Processing drive started at {drive_start_time} ({len(drive)} segments)...")
@@ -120,7 +126,6 @@ def sync_sftp_files():
                 try:
                     with open(concat_list_path, 'w') as f:
                         for i, segment in enumerate(drive):
-                            # CHANGED: Downloads land in TEMP_DIR
                             temp_hevc = os.path.join(TEMP_DIR, f"temp_{i}.hevc")
                             print(f"  Downloading segment {i+1}/{len(drive)}...")
                             sftp.get(segment['remote_path'], temp_hevc)
@@ -134,7 +139,6 @@ def sync_sftp_files():
                     ], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
                     print(f"  Moving completed drive to Plex library...")
-                    # Atomically move the finished file over to the real media directory
                     shutil.move(temp_mkv, final_mkv)
 
                     for segment in drive:
@@ -145,6 +149,8 @@ def sync_sftp_files():
                 except Exception as e:
                     print(f"  Failed to process drive {drive_start_time}: {e}")
                     if os.path.exists(temp_mkv): os.remove(temp_mkv)
+                    # Break out of the drive loop entirely if the network dropped mid-sync
+                    raise e
                 finally:
                     for tf in temp_files:
                         if os.path.exists(tf): os.remove(tf)
@@ -155,7 +161,7 @@ def sync_sftp_files():
             cleanup_old_files()
 
         except Exception as e:
-            print(f"SFTP Connection failed (Device likely offline): {e}")
+            print(f"SFTP Session interrupted or timed out: {e}")
     finally:
         sync_lock.release()
 
